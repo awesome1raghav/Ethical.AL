@@ -1,0 +1,10 @@
+{
+  "placeholderImages": [
+    {
+      "id": "avatar-user",
+      "description": "Premium user avatar in monochrome",
+      "imageUrl": "https://picsum.photos/seed/nexus-os-avatar/128/128?grayscale",
+      "imageHint": "monochrome avatar"
+    }
+  ]
+}

@@ -1,0 +1,194 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Pure Black Foundation */
+    --background: 0 0% 0%;
+    --foreground: 210 20% 98%;
+
+    /* Layered Void Structure */
+    --card: 0 0% 4%; /* #0A0A0A */
+    --card-foreground: 210 20% 98%;
+
+    --popover: 0 0% 0%;
+    --popover-foreground: 210 20% 98%;
+
+    /* Luxury Snow Accents */
+    --primary: 210 20% 98%; /* #f8f9fa */
+    --primary-foreground: 0 0% 0%;
+
+    --secondary: 0 0% 7%; /* #111111 */
+    --secondary-foreground: 210 20% 98%;
+
+    /* Precision Greys */
+    --muted: 210 10% 71%; /* #adb5bd */
+    --muted-foreground: 210 10% 71%;
+
+    --accent: 210 20% 98%;
+    --accent-foreground: 0 0% 0%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 20% 98%;
+
+    /* Elite Precision Borders */
+    --border: 210 14% 89% / 0.08;
+    --input: 210 14% 89% / 0.06;
+    --ring: 210 10% 71%;
+    --radius: 1.5rem;
+
+    /* Fluid Typography - System-wide scaling */
+    --font-hero: clamp(2rem, 5vw, 4.5rem);
+    --font-h1: clamp(1.75rem, 4vw, 3rem);
+    --font-h2: clamp(1.25rem, 3vw, 2.25rem);
+    --font-h3: clamp(1rem, 2vw, 1.4rem);
+    --font-body: clamp(0.875rem, 1vw, 1rem);
+    --font-micro: clamp(0.65rem, 0.8vw, 0.8rem);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-body antialiased;
+    background-image: radial-gradient(
+      ellipse at center,
+      rgba(255, 255, 255, 0.03) 0%,
+      transparent 70%
+    );
+    background-attachment: fixed;
+    overflow-x: hidden; /* Prevent horizontal scroll system-wide */
+  }
+}
+
+.text-fluid-hero { font-size: var(--font-hero); }
+.text-fluid-h1 { font-size: var(--font-h1); }
+.text-fluid-h2 { font-size: var(--font-h2); }
+.text-fluid-h3 { font-size: var(--font-h3); }
+.text-fluid-body { font-size: var(--font-body); }
+.text-fluid-micro { font-size: var(--font-micro); }
+
+.stealth-glass {
+  background: rgba(255, 255, 255, 0.025);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.luxury-surface {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.hover-surface {
+  @apply transition-all duration-300;
+}
+
+.hover-surface:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-white/10 rounded-full hover:bg-white/20 transition-colors;
+}
+
+/* Fluid Spacing Utility Classes */
+.p-fluid-outer { padding: clamp(1rem, 3vw, 3rem); }
+.p-fluid-inner { padding: clamp(1rem, 2vw, 1.5rem); }
+.m-fluid-outer { margin: clamp(1rem, 3vw, 3rem); }
+.gap-fluid { gap: clamp(1rem, 1.5vw, 2rem); }
+
+/* Nexus Button Premium Styles */
+.nexus-button {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 28px;
+  border-radius: 999px;
+  background: rgba(10,10,10,0.95);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #E8FFF6;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  overflow: hidden;
+  transition: transform 220ms ease, border-color 220ms ease, background 220ms ease, box-shadow 220ms ease;
+  backdrop-filter: blur(12px);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02), 0 0 0 rgba(74,222,128,0);
+}
+
+.nexus-button .text {
+  position: relative;
+  z-index: 2;
+  transition: transform 300ms ease;
+}
+
+.nexus-button svg {
+  width: 16px;
+  height: 16px;
+  stroke: #7EF7C8;
+  z-index: 2;
+  transition: transform 300ms ease, opacity 300ms ease;
+}
+
+/* moving glow strip */
+.nexus-button::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    115deg,
+    transparent 20%,
+    rgba(102,255,204,0.16) 50%,
+    transparent 80%
+  );
+  transform: translateX(-140%);
+  transition: transform 700ms cubic-bezier(.23,1,.32,1);
+}
+
+/* subtle hover glow */
+.nexus-button:hover {
+  border-color: rgba(102,255,204,0.28);
+  box-shadow: 
+    0 0 0 1px rgba(102,255,204,0.08),
+    0 0 24px rgba(102,255,204,0.12);
+  transform: translateY(-1px);
+}
+
+.nexus-button:hover::before {
+  transform: translateX(140%);
+}
+
+.nexus-button:hover .text {
+  transform: translateX(3px);
+}
+
+.nexus-button:hover svg {
+  transform: translateX(4px);
+}
+
+/* click feedback */
+.nexus-button:active {
+  transform: scale(0.985);
+}
+
+/* disabled */
+.nexus-button:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
