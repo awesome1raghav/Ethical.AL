@@ -1,0 +1,6 @@
+{
+  "name": "SOVEREIGN AI Governance",
+  "description": "Real-time AI Governance Layer for Nexus OS agent operations, featuring local policy engine, local risk analysis, and human-in-the-loop controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

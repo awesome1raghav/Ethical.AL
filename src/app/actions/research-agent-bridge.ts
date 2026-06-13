@@ -59,7 +59,7 @@ export async function runResearchAgent(
         ollama_model: 'gemma4:e4b',
         ollama_base_url: 'http://localhost:11434/',
       }),
-      signal: AbortSignal.timeout(120_000), // 2 min timeout for deep research
+      signal: AbortSignal.timeout(900_000), // 15 min timeout for deep research
     });
 
     if (!res.ok) {

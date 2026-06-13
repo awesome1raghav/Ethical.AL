@@ -1,0 +1,6 @@
+{
+  "name": "Nexus OS Agent Platform",
+  "description": "A unified operating system for AI agents, featuring Sovereign governance, Citadel security defense, local MongoDB storage, and advanced Gemini-driven agent workflows.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

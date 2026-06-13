@@ -14,7 +14,11 @@ import {
   Layers,
   ArrowRight,
   Search,
-  ShieldCheck
+  ShieldCheck,
+  Shield,
+  Radar,
+  Brain,
+  Landmark
 } from "lucide-react";
 import type { NaturalLanguageMissionIntakeOutput } from "@/ai/flows/natural-language-mission-intake";
 import { cn } from "@/lib/utils";
@@ -130,6 +134,34 @@ export const IntelligenceSidecar: React.FC<IntelligenceSidecarProps> = ({
                       </motion.p>
                     </AnimatePresence>
                   </div>
+                  
+                  {stat.label === "Estimated Agents" && !isPlaceholder && aiData?.suggested_agents && aiData.suggested_agents.length > 0 && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-wrap gap-1.5 mt-2">
+                      {aiData.suggested_agents.slice(0, 3).map((a: any) => {
+                         const id = typeof a === 'string' ? a : a.id;
+                         const agentInfo = [
+                            { id: 'compliance_enforcer', name: 'Compliance', icon: Shield },
+                            { id: 'threat_detector', name: 'Security', icon: Radar },
+                            { id: 'research_agent', name: 'Research', icon: Target },
+                            { id: 'financial_auditor', name: 'Finance', icon: Landmark },
+                            { id: 'system_optimizer', name: 'Optimizer', icon: Zap }
+                         ].find(x => x.id === id);
+                         if (!agentInfo) return null;
+                         const Icon = agentInfo.icon;
+                         return (
+                           <div key={id} className="flex items-center gap-1.5 bg-white/[0.06] border border-white/10 px-2.5 py-1 rounded-md">
+                             <Icon className="w-3 h-3 text-[#adb5bd]" />
+                             <span className="text-[10px] text-[#f8f9fa] font-body tracking-wide">{agentInfo.name}</span>
+                           </div>
+                         );
+                      })}
+                      {aiData.suggested_agents.length > 3 && (
+                         <div className="flex items-center justify-center bg-white/[0.03] border border-white/5 px-2 py-1 rounded-md">
+                           <span className="text-[9px] text-[#adb5bd] font-mono">+{aiData.suggested_agents.length - 3}</span>
+                         </div>
+                      )}
+                    </motion.div>
+                  )}
                 </div>
               </motion.div>
             );
@@ -172,42 +204,56 @@ export const IntelligenceSidecar: React.FC<IntelligenceSidecarProps> = ({
                       { id: 'financial_auditor', name: 'FinancialAuditor', role: 'Sovereign Transaction Audit Engine', type: 'optional' },
                       { id: 'system_optimizer', name: 'SystemOptimizer', role: 'Nexus Swarm Resource Optimizer', type: 'optional' }
                     ].map((agent) => {
-                      const isSuggested = aiData.suggested_agents?.includes(agent.id);
+                      // Support both string array (legacy) and object array
+                      const suggestedObj = aiData.suggested_agents?.find((a: any) => 
+                        (typeof a === 'string' ? a : a.id) === agent.id
+                      );
+                      const isSuggested = !!suggestedObj;
+                      const suggestionReason = typeof suggestedObj === 'object' ? suggestedObj.reason : null;
                       const isEnabled = activeAgents[agent.id] ?? (agent.type === 'required' || isSuggested);
                       const isRequired = agent.type === 'required';
 
                       return (
                         <div key={agent.id} className={cn(
-                          "p-4 rounded-xl border flex items-center justify-between transition-all duration-300",
+                          "p-4 rounded-xl border flex flex-col gap-3 transition-all duration-300",
                           isEnabled ? "bg-white/[0.03] border-white/10" : "bg-black/20 border-white/5 opacity-50"
                         )}>
-                          <div className="flex flex-col gap-0.5">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[13px] font-display font-bold text-white">{agent.name}</span>
-                              {isRequired && (
-                                <span className="text-[8px] font-mono px-1 rounded bg-white/10 text-white/60 uppercase font-bold">Required</span>
-                              )}
-                              {isSuggested && !isRequired && (
-                                <span className="text-[8px] font-mono px-1 rounded bg-[#810B38]/30 text-white/80 uppercase font-bold">Suggested</span>
-                              )}
+                          <div className="flex items-center justify-between">
+                            <div className="flex flex-col gap-0.5">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[13px] font-display font-bold text-white">{agent.name}</span>
+                                {isRequired && (
+                                  <span className="text-[8px] font-mono px-1 rounded bg-white/10 text-white/60 uppercase font-bold">Required</span>
+                                )}
+                                {isSuggested && !isRequired && (
+                                  <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-200 border border-blue-500/20 uppercase font-bold tracking-widest shadow-[0_0_8px_rgba(59,130,246,0.15)]">Suggested</span>
+                                )}
+                              </div>
+                              <span className="text-[10.5px] font-body text-[#8a8a8a]">{agent.role}</span>
                             </div>
-                            <span className="text-[10.5px] font-body text-[#8a8a8a]">{agent.role}</span>
+                            
+                            <button
+                              disabled={isRequired}
+                              onClick={() => onToggleAgent(agent.id)}
+                              className={cn(
+                                "h-5 w-10 rounded-full p-0.5 transition-colors duration-300 relative shrink-0",
+                                isRequired ? "bg-white/20 cursor-not-allowed" : 
+                                isEnabled ? "bg-white" : "bg-white/5"
+                              )}
+                            >
+                              <div className={cn(
+                                "h-4 w-4 rounded-full transition-all duration-300 shadow",
+                                isEnabled ? "translate-x-5 bg-black" : "bg-white/40"
+                              )} />
+                            </button>
                           </div>
                           
-                          <button
-                            disabled={isRequired}
-                            onClick={() => onToggleAgent(agent.id)}
-                            className={cn(
-                              "h-5 w-10 rounded-full p-0.5 transition-colors duration-300 relative shrink-0",
-                              isRequired ? "bg-white/20 cursor-not-allowed" : 
-                              isEnabled ? "bg-white" : "bg-white/5"
-                            )}
-                          >
-                            <div className={cn(
-                              "h-4 w-4 rounded-full transition-all duration-300 shadow",
-                              isEnabled ? "translate-x-5 bg-black" : "bg-white/40"
-                            )} />
-                          </button>
+                          {isSuggested && suggestionReason && (
+                            <div className="mt-1 p-2.5 rounded-lg bg-blue-500/5 border border-blue-500/10 flex items-start gap-2">
+                              <Zap className="h-3.5 w-3.5 text-blue-400 mt-0.5 shrink-0" />
+                              <p className="text-[10px] text-blue-200/70 font-body leading-relaxed">{suggestionReason}</p>
+                            </div>
+                          )}
                         </div>
                       );
                     })}

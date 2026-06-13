@@ -17,7 +17,9 @@ import {
   Target,
   Zap,
   FileJson,
-  AlertCircle
+  AlertCircle,
+  ToggleLeft,
+  ToggleRight
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -67,6 +69,7 @@ type OrchestratedAgent = {
   progress: number;
   description: string;
   runtimeText?: string;
+  enabled?: boolean;
 };
 
 type OrchestrationStep = {
@@ -74,6 +77,7 @@ type OrchestrationStep = {
   label: string;
   status: "pending" | "active" | "complete";
   timestamp?: number;
+  enabled?: boolean;
 };
 
 type GeneratedArtifact = {
@@ -82,6 +86,7 @@ type GeneratedArtifact = {
   type: "log" | "json" | "markdown" | "data";
   status: "generating" | "complete";
   timestamp: number;
+  content?: string;
 };
 
 const AGENT_LABELS: Record<string, string> = {
@@ -109,62 +114,81 @@ function detectOptionalAgents(description: string): string[] {
   return agents;
 }
 
-function buildRequiredAgents(): OrchestratedAgent[] {
-  return [
-    {
-      id: "research_agent",
-      name: "ResearchAgent",
-      role: "Research & Retrieval",
-      type: "required",
-      icon: Target,
-      status: "waiting",
-      progress: 0,
-      description: "Research mission-specific documents, knowledge, APIs, policies, regulations, sources, intelligence.",
-    },
-    {
-      id: "sovereign_agent",
-      name: "SovereignAgent",
-      role: "Governance Layer",
-      type: "required",
-      icon: Shield,
-      status: "waiting",
-      progress: 0,
-      description: "Ethical validation, risk scoring, autonomy approval, policy checks.",
-    },
-    {
-      id: "citadel_agent",
-      name: "CitadelAgent",
-      role: "Security Layer",
-      type: "required",
-      icon: Radar,
-      status: "waiting",
-      progress: 0,
-      description: "Threat detection, unsafe action prevention, prompt safety analysis.",
-    },
-    {
-      id: "analysis_agent",
-      name: "AnalysisAgent",
-      role: "Intelligence Synthesis",
-      type: "required",
-      icon: Brain,
-      status: "waiting",
-      progress: 0,
-      description: "Combining outputs from swarm into unified intelligence.",
-    },
+function buildDynamicAgents(snapshot?: MissionLaunchSnapshot | null): OrchestratedAgent[] {
+  const defaultAgents = [
+    { id: "research_agent", name: "ResearchAgent", role: "Research & Retrieval", type: "required" as const, icon: Target, status: "waiting" as const, progress: 0, description: "Research mission-specific documents, knowledge, APIs, policies, regulations, sources, intelligence." },
+    { id: "sovereign_agent", name: "SovereignAgent", role: "Governance Layer", type: "required" as const, icon: Shield, status: "waiting" as const, progress: 0, description: "Ethical validation, risk scoring, autonomy approval, policy checks." },
+    { id: "citadel_agent", name: "CitadelAgent", role: "Security Layer", type: "required" as const, icon: Radar, status: "waiting" as const, progress: 0, description: "Threat detection, unsafe action prevention, prompt safety analysis." },
+    { id: "analysis_agent", name: "AnalysisAgent", role: "Intelligence Synthesis", type: "required" as const, icon: Brain, status: "waiting" as const, progress: 0, description: "Combining outputs from swarm into unified intelligence." },
   ];
+
+  if (!snapshot) return defaultAgents;
+
+  const agentMap = new Map<string, string>();
+  if (snapshot.suggestedAgents && Array.isArray(snapshot.suggestedAgents)) {
+    snapshot.suggestedAgents.forEach(a => agentMap.set(a.toLowerCase().replace(/_/g, ''), a));
+  }
+  if (snapshot.workflowSteps && Array.isArray(snapshot.workflowSteps)) {
+    snapshot.workflowSteps.forEach(s => {
+      if (s.assigned_agent_id) {
+        const rawName = AGENT_LABELS[s.assigned_agent_id] || s.assigned_agent_id;
+        const normalized = rawName.toLowerCase().replace(/_/g, '');
+        if (!agentMap.has(normalized)) {
+          agentMap.set(normalized, rawName);
+        }
+      }
+    });
+  }
+
+  if (agentMap.size === 0) return defaultAgents;
+
+  return Array.from(agentMap.values()).map((agentName, i) => {
+    // Map icons based on name
+    let icon = Brain;
+    const lower = agentName.toLowerCase();
+    if (lower.includes("research")) icon = Target;
+    else if (lower.includes("policy") || lower.includes("compliance") || lower.includes("sovereign")) icon = Shield;
+    else if (lower.includes("threat") || lower.includes("security") || lower.includes("citadel")) icon = Radar;
+    else if (lower.includes("finance") || lower.includes("audit")) icon = Landmark;
+    else if (lower.includes("build") || lower.includes("dev")) icon = Zap;
+    else if (lower.includes("legal")) icon = AlertCircle;
+
+    return {
+      id: `agent-${i}-${Date.now()}`,
+      name: agentName,
+      role: `Specialized Unit`,
+      type: "required",
+      icon: icon,
+      status: "waiting",
+      progress: 0,
+      description: `Task-specific autonomous agent instantiated for ${agentName} operations.`,
+      enabled: true
+    };
+  });
 }
 
-function buildOrchestrationSteps(): OrchestrationStep[] {
-  return [
-    { id: "classify", label: "Mission classified", status: "pending" },
-    { id: "decompose", label: "Intent decomposition complete", status: "pending" },
-    { id: "governance", label: "Sovereign governance initiated", status: "pending" },
-    { id: "research", label: "ResearchAgent deployed", status: "pending" },
-    { id: "knowledge", label: "Knowledge graph synchronized", status: "pending" },
-    { id: "security", label: "Citadel verification complete", status: "pending" },
-    { id: "synthesis", label: "Confidence synthesis complete", status: "pending" },
-    { id: "ready", label: "Swarm deployment ready", status: "pending" },
+function buildOrchestrationSteps(snapshot?: MissionLaunchSnapshot | null): OrchestrationStep[] {
+  const defaultSteps = [
+    { id: "classify", label: "Mission classified", status: "pending" as const, enabled: true },
+    { id: "decompose", label: "Intent decomposition complete", status: "pending" as const, enabled: true },
+    { id: "governance", label: "Sovereign governance initiated", status: "pending" as const, enabled: true },
+    { id: "research", label: "ResearchAgent deployed", status: "pending" as const, enabled: true },
+    { id: "knowledge", label: "Knowledge graph synchronized", status: "pending" as const, enabled: true },
+    { id: "security", label: "Citadel verification complete", status: "pending" as const, enabled: true },
+    { id: "synthesis", label: "Confidence synthesis complete", status: "pending" as const, enabled: true },
+    { id: "ready", label: "Swarm deployment ready", status: "pending" as const, enabled: true },
   ];
+
+  if (!snapshot || !snapshot.workflowSteps || snapshot.workflowSteps.length === 0) {
+    return defaultSteps;
+  }
+
+  return snapshot.workflowSteps.map((step, index) => ({
+    id: `step-${index}`,
+    label: step.name,
+    status: "pending" as const,
+    enabled: true
+  }));
 }
 
 export default function MissionIntakePage() {
@@ -186,17 +210,17 @@ export default function MissionIntakePage() {
       if (rawSnapshot) {
         const parsedSnapshot = JSON.parse(rawSnapshot) as MissionLaunchSnapshot;
         setSnapshot(parsedSnapshot);
-        setAgents(buildRequiredAgents());
-        setOrchestrationSteps(buildOrchestrationSteps());
+        setAgents(buildDynamicAgents(parsedSnapshot));
+        setOrchestrationSteps(buildOrchestrationSteps(parsedSnapshot));
         setOptionalAgents(detectOptionalAgents(parsedSnapshot.missionDescription));
       } else {
-        setAgents(buildRequiredAgents());
-        setOrchestrationSteps(buildOrchestrationSteps());
+        setAgents(buildDynamicAgents(null));
+        setOrchestrationSteps(buildOrchestrationSteps(null));
       }
     } catch (error) {
       console.error("Failed to load mission launch snapshot:", error);
-      setAgents(buildRequiredAgents());
-      setOrchestrationSteps(buildOrchestrationSteps());
+      setAgents(buildDynamicAgents(null));
+      setOrchestrationSteps(buildOrchestrationSteps(null));
     }
   }, []);
 
@@ -222,27 +246,63 @@ export default function MissionIntakePage() {
     setStatusText("Analyzing mission");
     setGeneratedArtifacts([]);
 
-    // Orchestration timing: 2s intervals, cinematic but subtle
-    const timings = [
-      { step: 0, delay: 0, artifact: null, status: "Analyzing mission" },
-      { step: 1, delay: 2000, artifact: "mission_brief.json", status: "Deploying swarm" },
-      { step: 2, delay: 4000, artifact: null, status: "Governance active" },
-      { step: 3, delay: 6000, artifact: "policy_validation.log", status: "Security verified" },
-      { step: 4, delay: 8000, artifact: "research_findings.md", status: "Intelligence synthesis" },
-      { step: 5, delay: 10000, artifact: "risk_assessment.json", status: "Optional agents activate" },
-      { step: 6, delay: 13000, artifact: "execution_memory.log", status: "Execution ready" },
-      { step: 7, delay: 16000, artifact: null, status: "Ready for deployment" },
-    ];
+    const latencyInterval = 2500;
+    
+    const generateContent = (name: string, snap: MissionLaunchSnapshot | null, stepIndex: number) => {
+      if (!snap) return "{}";
+      
+      if (name.startsWith('sovereign_verify_')) {
+        const stepDetails = snap.workflowSteps ? snap.workflowSteps[stepIndex] : null;
+        return JSON.stringify({
+          verification_id: `sov-chk-${Date.now()}-${stepIndex}`,
+          target_step: stepDetails?.name || "Unknown Step",
+          assigned_agent: stepDetails?.assigned_agent_id || "System",
+          policy_checks: [
+            { policy: "Financial Autonomy Limit", status: "PASSED", confidence: 0.98 },
+            { policy: "Data Privacy Masking", status: "PASSED", confidence: 0.99 },
+            { policy: "Execution Safety", status: "PASSED", confidence: 0.95 }
+          ],
+          sovereign_decision: "APPROVED",
+          timestamp: new Date().toISOString()
+        }, null, 2);
+      }
 
-    // Orchestrate agents
+      return `[SYSTEM LOG]\nMission: ${snap.missionId}\nIntent: ${snap.detectedIntent}\nStatus: VERIFIED\nReady for deployment.`;
+    };
+
+    const timings = orchestrationSteps.map((step, idx) => {
+      const safeName = step.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').substring(0, 20);
+      const artifactName = `sovereign_verify_${safeName}.json`;
+
+      return {
+        step: idx,
+        delay: idx * latencyInterval,
+        artifact: artifactName,
+        status: `Verifying step ${idx + 1}...`
+      };
+    });
+    
+    timings.push({
+      step: orchestrationSteps.length,
+      delay: orchestrationSteps.length * latencyInterval,
+      artifact: null,
+      status: "Verification Complete"
+    });
+
     timings.forEach(({ step, delay, artifact, status }) => {
       timersRef.current.push(window.setTimeout(() => {
-        // Update agent status
         setAgents((current) =>
           current.map((agent, idx) => {
+            const agentStepProgress = (step / Math.max(1, orchestrationSteps.length)) * current.length;
             let agentStatus: AgentStatus = "waiting";
-            if (idx === step) agentStatus = "running";
-            else if (idx < step) agentStatus = "complete";
+            
+            if (step >= orchestrationSteps.length) {
+              agentStatus = "complete";
+            } else if (idx < Math.floor(agentStepProgress)) {
+              agentStatus = "complete";
+            } else if (idx === Math.floor(agentStepProgress)) {
+              agentStatus = "running";
+            }
             
             return {
               ...agent,
@@ -252,7 +312,6 @@ export default function MissionIntakePage() {
           })
         );
 
-        // Update orchestration step
         setOrchestrationSteps((current) =>
           current.map((s, idx) => ({
             ...s,
@@ -261,39 +320,41 @@ export default function MissionIntakePage() {
           }))
         );
 
-        // Update trust score progressively
-        setTrustScore((prev) => Math.min(prev + 12.5, 100));
+        setTrustScore((prev) => Math.min(prev + (100 / Math.max(1, orchestrationSteps.length)), 100));
 
-        // Add artifact
         if (artifact) {
+          const artifactId = `artifact-${Date.now()}-${step}`;
           setGeneratedArtifacts((prev) => [
             ...prev,
             {
-              id: `artifact-${Date.now()}`,
+              id: artifactId,
               name: artifact,
               type: artifact.split(".").pop() as any,
               status: "generating",
               timestamp: Date.now(),
+              content: generateContent(artifact, snapshot, step),
             },
           ]);
 
           timersRef.current.push(window.setTimeout(() => {
             setGeneratedArtifacts((prev) =>
-              prev.map((a) => (a.timestamp === Date.now() ? { ...a, status: "complete" } : a))
+              prev.map((a) => (a.id === artifactId ? { ...a, status: "complete" } : a))
             );
-          }, delay + 800));
+          }, 2000));
         }
 
         setStatusText(status);
+
+        if (step >= orchestrationSteps.length) {
+          setIsComplete(true);
+          timersRef.current.push(window.setTimeout(() => {
+            setIsBooting(false);
+            setTrustScore(100);
+            setStatusText("Execution ready");
+          }, 600));
+        }
       }, delay));
     });
-
-    timersRef.current.push(window.setTimeout(() => {
-      setIsBooting(false);
-      setIsComplete(true);
-      setTrustScore(100);
-      setStatusText("Execution ready");
-    }, 18000));
   };
 
   const continueToExecution = () => {
@@ -335,8 +396,9 @@ export default function MissionIntakePage() {
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   className={cn(
-                    "rounded-[24px] border p-5 transition-all",
-                    agent.status === "running" ? "bg-white/[0.08] border-white/20 shadow-[0_0_20px_rgba(255,255,255,0.06)]" : agent.status === "complete" ? "bg-white/[0.04] border-white/10" : "bg-white/[0.02] border-white/5"
+                    "rounded-[24px] border p-5 transition-all relative overflow-hidden",
+                    agent.enabled === false ? "opacity-40 grayscale" : "",
+                    agent.status === "running" && agent.enabled !== false ? "bg-white/[0.08] border-white/20 shadow-[0_0_20px_rgba(255,255,255,0.06)]" : agent.status === "complete" && agent.enabled !== false ? "bg-white/[0.04] border-white/10" : "bg-white/[0.02] border-white/5"
                   )}
                 >
                   <div className="flex items-start gap-3 mb-3">
@@ -347,6 +409,24 @@ export default function MissionIntakePage() {
                       <h3 className="text-sm font-display font-bold text-white">{agent.name}</h3>
                       <p className="text-[11px] text-[#8A8A8A]">{agent.role}</p>
                     </div>
+                    
+                    <button 
+                      type="button"
+                      onClick={() => setAgents(agents.map(a => a.id === agent.id ? { ...a, enabled: a.enabled === false ? true : false } : a))}
+                      className={cn(
+                        "relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-all duration-300 ease-in-out hover:scale-105 ml-2 mt-0.5",
+                        agent.enabled !== false ? "bg-white/30 hover:bg-white/40 shadow-[0_0_10px_rgba(255,255,255,0.1)]" : "bg-white/10 hover:bg-white/20"
+                      )}
+                      title={agent.enabled === false ? "Enable Agent" : "Disable Agent"}
+                    >
+                      <span
+                        className={cn(
+                          "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white transition duration-300 ease-in-out shadow-sm",
+                          agent.enabled !== false ? "translate-x-4 shadow-[0_0_8px_white]" : "translate-x-0 opacity-40"
+                        )}
+                      />
+                    </button>
+
                     <motion.div
                       initial={false}
                       animate={{
@@ -354,8 +434,9 @@ export default function MissionIntakePage() {
                       }}
                       transition={{ duration: 2, repeat: agent.status === "running" ? Infinity : 0 }}
                       className={cn(
-                        "h-2 w-2 rounded-full",
-                        agent.status === "complete" ? "bg-white shadow-[0_0_6px_white]" : agent.status === "running" ? "bg-white animate-pulse" : "bg-white/20"
+                        "h-2 w-2 rounded-full absolute top-5 right-5",
+                        agent.status === "complete" ? "bg-white shadow-[0_0_6px_white]" : agent.status === "running" ? "bg-white animate-pulse" : "bg-white/20",
+                        agent.enabled === false ? "hidden" : ""
                       )}
                     />
                   </div>
@@ -405,11 +486,11 @@ export default function MissionIntakePage() {
             )}
           </div>
 
-          {/* Mission Execution Plan */}
+          {/* Verification Process BY Sovereign */}
           <div className="luxury-surface rounded-[32px] p-8 md:p-12 relative overflow-hidden">
             <div className="mb-8">
               <span className="text-[10px] font-mono font-bold uppercase tracking-[0.3em] text-[#5C5C5C] block mb-2">Orchestration Timeline</span>
-              <h2 className="text-2xl md:text-3xl font-display font-bold text-white">Mission Execution Plan</h2>
+              <h2 className="text-2xl md:text-3xl font-display font-bold text-white">Verification Process BY Sovereign</h2>
             </div>
 
             <div className="space-y-4">
@@ -420,8 +501,9 @@ export default function MissionIntakePage() {
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: index * 0.03 }}
                   className={cn(
-                    "rounded-[20px] border px-5 py-4 flex items-start gap-4 transition-all",
-                    step.status === "active" ? "bg-white/[0.06] border-white/15" : step.status === "complete" ? "bg-white/[0.03] border-white/8" : "bg-white/[0.01] border-white/5"
+                    "rounded-[20px] border px-5 py-4 flex items-center gap-4 transition-all relative overflow-hidden",
+                    step.enabled === false ? "opacity-50 grayscale" : "",
+                    step.status === "active" && step.enabled !== false ? "bg-white/[0.06] border-white/15" : step.status === "complete" && step.enabled !== false ? "bg-white/[0.03] border-white/8" : "bg-white/[0.01] border-white/5"
                   )}
                 >
                   <div className="pt-1">
@@ -430,10 +512,28 @@ export default function MissionIntakePage() {
                     {step.status === "pending" && <div className="h-5 w-5 rounded-full border-2 border-white/30" />}
                   </div>
                   <div className="flex-grow">
-                    <p className={cn("text-[13px] font-body font-semibold", step.status === "pending" ? "text-[#8A8A8A]" : "text-white")}>
+                    <p className={cn("text-[13px] font-body font-semibold", step.status === "pending" ? "text-[#8A8A8A]" : "text-white", step.enabled === false && "line-through text-[#5C5C5C]")}>
                       {step.label}
                     </p>
                   </div>
+                  
+                  <button 
+                    type="button"
+                    onClick={() => setOrchestrationSteps(orchestrationSteps.map(s => s.id === step.id ? { ...s, enabled: s.enabled === false ? true : false } : s))}
+                    className={cn(
+                      "relative inline-flex h-4 w-8 mx-3 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-all duration-300 ease-in-out hover:scale-110",
+                      step.enabled !== false ? "bg-white/30 hover:bg-white/40 shadow-[0_0_10px_rgba(255,255,255,0.1)]" : "bg-white/10 hover:bg-white/20"
+                    )}
+                    title={step.enabled === false ? "Enable Step" : "Disable Step"}
+                  >
+                    <span
+                      className={cn(
+                        "pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white transition duration-300 ease-in-out shadow-sm",
+                        step.enabled !== false ? "translate-x-4 shadow-[0_0_8px_white]" : "translate-x-0 opacity-40"
+                      )}
+                    />
+                  </button>
+
                   <span className="text-[10px] font-mono text-[#5C5C5C]">
                     {step.status === "complete" ? `+${Math.floor(Math.random() * 200) + 50}ms` : step.status === "active" ? "running" : "queued"}
                   </span>
@@ -456,9 +556,20 @@ export default function MissionIntakePage() {
                     key={artifact.id}
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
+                    onClick={() => {
+                      if (artifact.status === "complete" && artifact.content) {
+                        const blob = new Blob([artifact.content], { type: "text/plain" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = artifact.name;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                      }
+                    }}
                     className={cn(
                       "rounded-[18px] border px-4 py-3 flex items-center justify-between transition-all",
-                      artifact.status === "complete" ? "bg-white/[0.04] border-white/8" : "bg-white/[0.02] border-white/5"
+                      artifact.status === "complete" ? "bg-white/[0.04] border-white/8 cursor-pointer hover:bg-white/[0.08]" : "bg-white/[0.02] border-white/5 opacity-70"
                     )}
                   >
                     <div className="flex items-center gap-3">

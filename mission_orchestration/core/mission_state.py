@@ -1,145 +1,165 @@
-"""
-Mission state definitions and enums for Ethical.AL mission orchestration.
-"""
+from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from uuid import uuid4
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_now_iso() -> str:
+    return utc_now().isoformat()
 
 
 class MissionStatus(str, Enum):
-    """Mission lifecycle states."""
-    PENDING = "pending"
-    QUEUED = "queued"
-    RUNNING = "running"
-    RETRYING = "retrying"
-    PAUSED = "paused"
-    FAILED = "failed"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
+    PENDING = "PENDING"
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    RETRYING = "RETRYING"
+    PAUSED = "PAUSED"
+    FAILED = "FAILED"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
 
 
-class AgentStatus(str, Enum):
-    """Agent execution states."""
-    IDLE = "idle"
-    INITIALIZING = "initializing"
-    RUNNING = "running"
-    PAUSED = "paused"
-    RECOVERING = "recovering"
-    COMPLETED = "completed"
-    FAILED = "failed"
+class StepStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
 
 
-class EventType(str, Enum):
-    """Mission and agent events."""
-    MISSION_CREATED = "mission_created"
-    MISSION_STARTED = "mission_started"
-    MISSION_COMPLETED = "mission_completed"
-    MISSION_FAILED = "mission_failed"
-    MISSION_CANCELLED = "mission_cancelled"
-    MISSION_PAUSED = "mission_paused"
-    MISSION_RESUMED = "mission_resumed"
-    AGENT_STARTED = "agent_started"
-    AGENT_TIMEOUT = "agent_timeout"
-    AGENT_FAILED = "agent_failed"
-    AGENT_COMPLETED = "agent_completed"
-    RECOVERY_STARTED = "recovery_started"
-    RECOVERY_FAILED = "recovery_failed"
-    CHECKPOINT_SAVED = "checkpoint_saved"
-    CHECKPOINT_RESTORED = "checkpoint_restored"
+class MissionEventType(str, Enum):
+    MISSION_CREATED = "MISSION_CREATED"
+    MISSION_STARTED = "MISSION_STARTED"
+    AGENT_STARTED = "AGENT_STARTED"
+    AGENT_TIMEOUT = "AGENT_TIMEOUT"
+    RECOVERY_STARTED = "RECOVERY_STARTED"
+    CHECKPOINT_RESTORED = "CHECKPOINT_RESTORED"
+    CHECKPOINT_SAVED = "CHECKPOINT_SAVED"
+    MISSION_COMPLETED = "MISSION_COMPLETED"
+    MISSION_FAILED = "MISSION_FAILED"
+    MISSION_CANCELLED = "MISSION_CANCELLED"
+    HEARTBEAT_RECEIVED = "HEARTBEAT_RECEIVED"
 
 
 @dataclass
-class Heartbeat:
-    """Agent heartbeat message."""
+class MissionStep:
+    index: int
+    name: str
+    assigned_agent_id: str
+    is_legal: bool = True
+    legality_reason: str = ""
+    dependencies: List[int] = field(default_factory=list)
+    status: StepStatus = StepStatus.PENDING
+    retries: int = 0
+    result: Dict[str, Any] = field(default_factory=dict)
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    failed_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload["status"] = self.status.value
+        return payload
+
+
+@dataclass
+class AgentHeartbeat:
     mission_id: str
-    agent_id: str
-    timestamp: datetime
-    status: AgentStatus
-    progress: int  # 0-100
+    agent: str
+    timestamp: str = field(default_factory=utc_now_iso)
+    status: str = "running"
+    progress: int = 0
+    current_step: int = 0
+    retry_count: int = 0
+    elapsed_time: int = 0
+    message: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class MissionCheckpoint:
+    mission_id: str
     current_step: int
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    progress: float
+    completed_steps: List[Dict[str, Any]]
+    agent_state: Dict[str, Any]
+    partial_results: List[Dict[str, Any]]
+    retry_count: int
+    updated_at: str = field(default_factory=utc_now_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
 class MissionEvent:
-    """Audit event for mission execution."""
-    event_id: str = field(default_factory=lambda: str(uuid4()))
-    event_type: EventType = EventType.MISSION_CREATED
-    mission_id: str = ""
-    agent_id: Optional[str] = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    mission_id: str
+    event_type: MissionEventType
+    message: str
     details: Dict[str, Any] = field(default_factory=dict)
-    error: Optional[str] = None
+    created_at: str = field(default_factory=utc_now_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload["event_type"] = self.event_type.value
+        return payload
 
 
 @dataclass
-class StepResult:
-    """Result from a workflow step execution."""
+class AgentResult:
+    mission_id: str
     step_id: str
     agent_id: str
-    status: str  # "success", "failed", "retry"
-    output: Dict[str, Any] = field(default_factory=dict)
-    error: Optional[str] = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    retry_count: int = 0
+    status: str
+    progress: int
+    output: Dict[str, Any]
+    message: str
+    completed_at: str = field(default_factory=utc_now_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
-class MissionContext:
-    """Complete mission execution context."""
+class MissionState:
     mission_id: str
     description: str
+    primary_intent: str = "General Operation"
     status: MissionStatus = MissionStatus.PENDING
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    
-    # Execution tracking
     current_step: int = 0
-    completed_steps: List[str] = field(default_factory=list)
-    failed_steps: List[str] = field(default_factory=list)
-    pending_steps: List[str] = field(default_factory=list)
-    
-    # Retry tracking
     retry_count: int = 0
     max_retries: int = 5
-    last_retry_at: Optional[datetime] = None
-    
-    # Timeout tracking
-    timeout_seconds: int = 1800  # 30 minutes
-    agent_timeout_seconds: int = 300  # 5 minutes
-    
-    # Agent tracking
-    active_agents: Dict[str, AgentStatus] = field(default_factory=dict)
-    agent_heartbeats: Dict[str, datetime] = field(default_factory=dict)
-    
-    # Results storage
-    results: Dict[str, Any] = field(default_factory=dict)
-    partial_results: List[StepResult] = field(default_factory=list)
-    
-    # Metadata
+    mission_timeout_seconds: int = 1800
+    agent_timeout_seconds: int = 300
+    heartbeat_timeout_seconds: int = 30
+    workflow_steps: List[MissionStep] = field(default_factory=list)
+    completed_steps: List[int] = field(default_factory=list)
+    failed_steps: List[int] = field(default_factory=list)
+    partial_results: List[Dict[str, Any]] = field(default_factory=list)
+    agent_state: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    priority: int = 0
+    created_at: str = field(default_factory=utc_now_iso)
+    updated_at: str = field(default_factory=utc_now_iso)
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    cancelled_at: Optional[str] = None
+    last_error: Optional[str] = None
 
+    def elapsed_seconds(self) -> int:
+        anchor = self.started_at or self.created_at
+        anchor_dt = datetime.fromisoformat(anchor)
+        return int((utc_now() - anchor_dt).total_seconds())
 
-@dataclass
-class Checkpoint:
-    """Saved mission checkpoint for recovery."""
-    checkpoint_id: str = field(default_factory=lambda: str(uuid4()))
-    mission_id: str = ""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    
-    # Execution state
-    current_step: int = 0
-    completed_steps: List[str] = field(default_factory=list)
-    failed_steps: List[str] = field(default_factory=list)
-    
-    # Results to restore
-    partial_results: List[StepResult] = field(default_factory=list)
-    agent_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    
-    # Context
-    mission_context: Optional[MissionContext] = None
+    def to_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload["status"] = self.status.value
+        payload["workflow_steps"] = [step.to_dict() for step in self.workflow_steps]
+        return payload

@@ -124,13 +124,14 @@ export default function EntryPage() {
   // Automatically enable optional agents if suggested by Ollama
   useEffect(() => {
     if (aiResult) {
-      const suggested = aiResult.suggested_agents || [];
+      // Extract IDs from the new object structure
+      const suggestedIds = aiResult.suggested_agents?.map((a: any) => typeof a === 'string' ? a : a.id) || [];
       setActiveAgents({
         compliance_enforcer: true,
         threat_detector: true,
-        research_agent: suggested.includes("research_agent"),
-        financial_auditor: suggested.includes("financial_auditor"),
-        system_optimizer: suggested.includes("system_optimizer"),
+        research_agent: suggestedIds.includes("research_agent"),
+        financial_auditor: suggestedIds.includes("financial_auditor"),
+        system_optimizer: suggestedIds.includes("system_optimizer"),
       });
     }
   }, [aiResult]);
@@ -169,6 +170,7 @@ export default function EntryPage() {
 
   const handleLaunch = async () => {
     if (!input.trim() && pendingMedia.length === 0) return;
+    if (isLaunching) return; // Prevent double-click
     setIsLaunching(true);
 
     const missionId = `M-${Math.floor(100 + Math.random() * 900)}`;
@@ -217,14 +219,26 @@ export default function EntryPage() {
           })
         );
       }
+
+      // Navigate after brief animation
+      setTimeout(() => {
+        setPendingMedia([]);
+        router.push("/intake");
+      }, 1200);
     } catch (error) {
       console.error("Failed to save mission to SQLite:", error);
+      // Still navigate — don't get stuck on the launch overlay
+      setTimeout(() => {
+        setPendingMedia([]);
+        router.push("/intake");
+      }, 800);
     }
 
+    // Safety timeout: if navigation hasn't happened in 5s, force it
     setTimeout(() => {
-      setPendingMedia([]);
+      setIsLaunching(false);
       router.push("/intake");
-    }, 1200);
+    }, 5000);
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {

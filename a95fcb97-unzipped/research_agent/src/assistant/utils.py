@@ -104,9 +104,11 @@ def duckduckgo_search(query: str, max_results: int = 3, fetch_full_page: bool = 
         return {"results": []}
     
     try:
+        print("SEARCH STARTED")
         ddgs = DDGS()
         results = []
         search_results = list(ddgs.text(query, max_results=max_results))
+        print("SEARCH RESULTS:", len(search_results))
         
         for r in search_results:
             # Handle both old (href/body) and new (url/description) key names

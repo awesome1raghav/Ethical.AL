@@ -33,6 +33,7 @@ import {
   getChatHistory 
 } from "@/app/actions/db-actions";
 import { runResearchAgent, checkResearchAgentHealth } from "@/app/actions/research-agent-bridge";
+import { runCitadelAgentStep } from "@/app/actions/citadel-bridge";
 
 interface DBStep {
   id: string;
@@ -157,6 +158,8 @@ export default function ExecutionCenterPage() {
       setCurrentLevel(8);
       await insertLog("system", null, `[LEVEL 8 — ACTIVE MISSIONS] Commencing workflow step execution...`);
       
+      const previousOutputs: string[] = [];
+      
       for (let i = 0; i < steps.length; i++) {
         // Handle pause
         while (isPaused) {
@@ -225,8 +228,48 @@ export default function ExecutionCenterPage() {
             }
           }
         } else {
-          // All other agents: simulate execution with a delay
-          await delay(3000);
+          // All other agents: call the Citadel backend for Builder, Governance, etc.
+          await insertLog("agent", assignedAgent?.name || "AI Agent", `⚙️ Calling Nexus OS Citadel backend for: "${currentStep.name}"...`);
+          try {
+            const citadelResult = await runCitadelAgentStep(
+              mission.primary_intent || "AI Operation",
+              currentStep.name,
+              assignedAgent?.name || "AI Agent",
+              previousOutputs
+            );
+            
+            // Log the result
+            for (const log of citadelResult.logs) {
+              await insertLog("agent", assignedAgent?.name || "AI Agent", log);
+              await delay(800);
+            }
+            
+            if (citadelResult.output) {
+              const preview = citadelResult.output.substring(0, 600) + (citadelResult.output.length > 600 ? '...' : '');
+              await insertLog("agent", assignedAgent?.name || "AI Agent", `📋 Task Output:\n\n${preview}`);
+              previousOutputs.push(citadelResult.output);
+            }
+
+            // Check Sovereign Policy block
+            if (citadelResult.securityStatus === 'blocked') {
+              const failedPolicy = citadelResult.policiesChecked.find(p => !p.passed);
+              await updateStepStatusAction(currentStep.id, 'failed');
+              await updateAgentStatusAction(currentStep.assigned_agent_id, 'error');
+              setSteps(prev => prev.map(s => s.id === currentStep.id ? { ...s, status: 'failed' } : s));
+              setAgents(prev => prev.map(a => a.id === currentStep.assigned_agent_id ? { ...a, status: 'error' } : a));
+
+              await insertLog("agent", "CitadelGuard", `🛑 SOVEREIGN DYNAMIC BLOCK TRIGGERED on step "${currentStep.name}".`);
+              if (failedPolicy) {
+                await insertLog("agent", "CitadelGuard", `Policy Violation: [${failedPolicy.policyName}] - ${failedPolicy.reason}`);
+              }
+              await insertLog("system", null, `Mission execution HALTED by Citadel Security Layer.`);
+              setIsFailed(true);
+              setCurrentLevel(9); // Stop and enter chat override
+              return;
+            }
+          } catch (err: any) {
+            await insertLog("agent", assignedAgent?.name || "AI Agent", `❌ Citadel Backend error: ${err.message}`);
+          }
         }
 
         // Complete step

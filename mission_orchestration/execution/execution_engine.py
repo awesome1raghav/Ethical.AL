@@ -1,287 +1,182 @@
-"""
-Execution engine that orchestrates workflow execution with retry and recovery.
-"""
+from __future__ import annotations
 
-import asyncio
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from dataclasses import dataclass
 import logging
-import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
-from ..core.mission_manager import MissionManager
-from ..core.mission_state import AgentStatus
+from ..agents import FinancialAuditor, ResearchAgent, SystemOptimizer, ThreatDetector
+from ..agents._shared import AgentRuntimeContext
+from ..core.mission_queue import QueueItem
+from ..core.mission_state import AgentResult, MissionCheckpoint, MissionEventType, MissionState, MissionStatus, StepStatus, utc_now_iso
+from ..storage.audit_store import AuditStore
 from ..storage.mission_store import MissionStore
 from .dependency_graph import DependencyGraph
 from .workflow_builder import WorkflowBuilder
 
+
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class ExecutionOutcome:
+    mission_id: str
+    status: MissionStatus
+    completed_steps: List[int]
+    message: str = ""
+    failed_step: Optional[int] = None
+
+
 class ExecutionEngine:
-    """
-    Orchestrates mission execution with:
-    - Workflow planning
-    - Step-by-step execution
-    - Retry logic
-    - Dependency tracking
-    - Recovery from checkpoints
-    """
-    
-    def __init__(self, mission_manager: MissionManager,
-                 mission_store: MissionStore,
-                 workflow_builder: WorkflowBuilder):
-        self.mission_manager = mission_manager
+    def __init__(
+        self,
+        mission_store: MissionStore,
+        audit_store: AuditStore,
+        workflow_builder: WorkflowBuilder,
+        dependency_graph: DependencyGraph,
+        research_agent: ResearchAgent,
+        threat_detector: ThreatDetector,
+        financial_auditor: FinancialAuditor,
+        system_optimizer: SystemOptimizer,
+        checkpoint_manager,
+        recovery_engine,
+    ) -> None:
         self.mission_store = mission_store
+        self.audit_store = audit_store
         self.workflow_builder = workflow_builder
-        
-        self._agent_executors: Dict[str, Callable] = {}
-        self._workflows: Dict[str, DependencyGraph] = {}
-    
-    def register_agent_executor(self, agent_id: str, 
-                               executor: Callable) -> None:
-        """Register executor function for agent."""
-        self._agent_executors[agent_id] = executor
-        logger.info(f"[EXECUTION] Registered executor for agent {agent_id}")
-    
-    def build_mission_workflow(self, mission_id: str) -> bool:
-        """Build workflow for mission."""
-        mission_context = self.mission_store.get_mission(mission_id)
-        if not mission_context:
-            logger.error(f"[EXECUTION] Mission {mission_id} not found")
-            return False
-        
-        try:
-            workflow = self.workflow_builder.build_workflow(mission_context)
-            self._workflows[mission_id] = workflow
-            
-            execution_order = workflow.get_execution_order()
-            mission_context.pending_steps = execution_order
-            
-            logger.info(f"[EXECUTION] Workflow built for mission {mission_id}: {execution_order}")
-            
-            return True
-        
-        except Exception as e:
-            logger.error(f"[EXECUTION] Failed to build workflow: {e}")
-            return False
-    
-    async def execute_mission(self, mission_id: str) -> bool:
-        """
-        Execute mission workflow with retries and recovery.
-        
-        Returns True if mission completed successfully.
-        """
-        mission_context = self.mission_store.get_mission(mission_id)
-        if not mission_context:
-            logger.error(f"[EXECUTION] Mission {mission_id} not found")
-            return False
-        
-        workflow = self._workflows.get(mission_id)
-        if not workflow:
-            logger.error(f"[EXECUTION] Workflow not found for mission {mission_id}")
-            return False
-        
-        # Start the mission
-        self.mission_manager.start_mission(mission_id)
-        
-        retry_count = 0
-        max_retries = mission_context.max_retries
-        
-        while retry_count < max_retries:
-            try:
-                if await self._execute_workflow(mission_id, workflow):
-                    # Mission completed successfully
-                    self.mission_manager.complete_mission(
-                        mission_id,
-                        mission_context.results
-                    )
-                    return True
-                else:
-                    # Workflow failed, check if recoverable
-                    if self.mission_manager.recovery_engine.can_recover(mission_id):
-                        retry_count += 1
-                        
-                        if retry_count < max_retries:
-                            logger.info(
-                                f"[EXECUTION] Mission {mission_id} retry {retry_count}/{max_retries}"
-                            )
-                            
-                            self.mission_manager.prepare_retry(mission_id)
-                            
-                            # Wait before retry with exponential backoff
-                            backoff = 2 ** retry_count
-                            await asyncio.sleep(min(backoff, 32))
-                        else:
-                            logger.error(
-                                f"[EXECUTION] Max retries exceeded for mission {mission_id}"
-                            )
-                            self.mission_manager.fail_mission(
-                                mission_id,
-                                "Max retries exceeded"
-                            )
-                            return False
-                    else:
-                        logger.error(
-                            f"[EXECUTION] Mission {mission_id} failed and not recoverable"
-                        )
-                        self.mission_manager.fail_mission(
-                            mission_id,
-                            "Workflow failed - no recovery checkpoint"
-                        )
-                        return False
-            
-            except Exception as e:
-                logger.error(f"[EXECUTION] Unexpected error executing mission {mission_id}: {e}")
-                self.mission_manager.fail_mission(mission_id, str(e))
-                return False
-        
-        return False
-    
-    async def _execute_workflow(self, mission_id: str, 
-                               workflow: DependencyGraph) -> bool:
-        """
-        Execute workflow steps in order.
-        
-        Returns True if all steps completed successfully.
-        """
-        mission_context = self.mission_store.get_mission(mission_id)
-        if not mission_context:
-            return False
-        
-        try:
-            execution_order = workflow.get_execution_order()
-            
-            for step_id in execution_order:
-                # Check if already completed
-                if step_id in mission_context.completed_steps:
-                    logger.info(f"[EXECUTION] Skipping completed step {step_id}")
-                    continue
-                
-                # Check if previously failed
-                if step_id in mission_context.failed_steps:
-                    logger.warning(f"[EXECUTION] Step {step_id} previously failed, skipping")
-                    continue
-                
-                # Execute step
-                if not await self._execute_step(mission_id, workflow, step_id):
-                    logger.error(f"[EXECUTION] Step {step_id} failed")
-                    return False
-            
-            return True
-        
-        except Exception as e:
-            logger.error(f"[EXECUTION] Workflow execution error: {e}")
-            return False
-    
-    async def _execute_step(self, mission_id: str, workflow: DependencyGraph,
-                           step_id: str) -> bool:
-        """
-        Execute single workflow step.
-        
-        Returns True if step succeeded.
-        """
-        mission_context = self.mission_store.get_mission(mission_id)
-        if not mission_context:
-            return False
-        
-        node = workflow.nodes[step_id]
-        agent_id = node.agent_id
-        
-        logger.info(f"[EXECUTION] Executing step {step_id} with agent {agent_id}")
-        
-        # Register agent
-        self.mission_manager.register_agent(mission_id, agent_id)
-        
-        # Get executor
-        executor = self._agent_executors.get(agent_id)
-        if not executor:
-            logger.error(f"[EXECUTION] No executor registered for agent {agent_id}")
-            self.mission_manager.record_step_result(
-                mission_id, step_id, agent_id, "failed",
-                error=f"No executor for {agent_id}"
-            )
-            return False
-        
-        try:
-            # Execute with timeout
-            result = await asyncio.wait_for(
-                asyncio.to_thread(executor, mission_id, step_id, mission_context),
-                timeout=node.timeout_seconds
-            )
-            
-            # Record result
-            self.mission_manager.record_step_result(
-                mission_id, step_id, agent_id, "success",
-                output=result or {}
-            )
-            
-            # Update mission context
-            mission_context.completed_steps.append(step_id)
-            mission_context.current_step += 1
-            mission_context.results[step_id] = result or {}
-            
-            logger.info(f"[EXECUTION] Step {step_id} completed successfully")
-            
-            return True
-        
-        except asyncio.TimeoutError:
-            logger.error(f"[EXECUTION] Step {step_id} timeout after {node.timeout_seconds}s")
-            
-            if node.retryable:
-                # Retryable step failed, but workflow will be retried
-                return False
-            else:
-                self.mission_manager.record_step_result(
-                    mission_id, step_id, agent_id, "failed",
-                    error="Step timeout"
-                )
-                mission_context.failed_steps.append(step_id)
-                return False
-        
-        except Exception as e:
-            logger.error(f"[EXECUTION] Step {step_id} error: {e}")
-            
-            self.mission_manager.record_step_result(
-                mission_id, step_id, agent_id, "failed",
-                error=str(e)
-            )
-            
-            if node.retryable:
-                return False
-            else:
-                mission_context.failed_steps.append(step_id)
-                return False
-    
-    def get_workflow_status(self, mission_id: str) -> Optional[Dict[str, Any]]:
-        """Get current workflow execution status."""
-        mission_context = self.mission_store.get_mission(mission_id)
-        if not mission_context:
-            return None
-        
-        workflow = self._workflows.get(mission_id)
-        if not workflow:
-            return None
-        
-        execution_order = workflow.get_execution_order()
-        
-        return {
-            "mission_id": mission_id,
-            "total_steps": len(execution_order),
-            "completed_steps": len(mission_context.completed_steps),
-            "failed_steps": len(mission_context.failed_steps),
-            "current_step": mission_context.current_step,
-            "progress_percent": int((len(mission_context.completed_steps) / len(execution_order) * 100)) if execution_order else 0,
-            "execution_order": execution_order,
-            "step_status": {
-                step_id: self._get_step_status(step_id, mission_context)
-                for step_id in execution_order
-            }
+        self.dependency_graph = dependency_graph
+        self.research_agent = research_agent
+        self.threat_detector = threat_detector
+        self.financial_auditor = financial_auditor
+        self.system_optimizer = system_optimizer
+        self.checkpoint_manager = checkpoint_manager
+        self.recovery_engine = recovery_engine
+        self._agents = {
+            "research_agent": research_agent,
+            "threat_detector": threat_detector,
+            "financial_auditor": financial_auditor,
+            "system_optimizer": system_optimizer,
         }
-    
-    def _get_step_status(self, step_id: str, mission_context) -> str:
-        """Get status of single step."""
-        if step_id in mission_context.completed_steps:
-            return "completed"
-        elif step_id in mission_context.failed_steps:
-            return "failed"
-        else:
-            return "pending"
+
+    def execute(self, item: QueueItem) -> ExecutionOutcome:
+        mission = self.mission_store.get_mission(item.mission_id)
+        if mission is None:
+            raise ValueError(f"Unknown mission: {item.mission_id}")
+
+        steps = mission.workflow_steps or self.workflow_builder.build_steps(mission.description)
+        self.dependency_graph.build(steps)
+        checkpoint = item.checkpoint or self.checkpoint_manager.latest(mission.mission_id)
+
+        completed_steps = set(mission.completed_steps)
+        partial_results = list(mission.partial_results)
+        if checkpoint is not None:
+            completed_steps.update(step["step_id"] for step in checkpoint.completed_steps)
+            partial_results = list(checkpoint.partial_results)
+            self.audit_store.record(mission.mission_id, MissionEventType.CHECKPOINT_RESTORED, "Checkpoint restored", checkpoint.to_dict())
+
+        self.mission_store.update_mission(
+            mission.mission_id,
+            status=MissionStatus.RUNNING,
+            started_at=mission.started_at or utc_now_iso(),
+            current_step=mission.current_step,
+            agent_state={"current_agent": mission.agent_state.get("current_agent", ""), "progress": mission.agent_state.get("progress", 0)},
+        )
+        self.audit_store.record(mission.mission_id, MissionEventType.MISSION_STARTED, "Mission started", {"mission_id": mission.mission_id})
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"mission-{mission.mission_id}") as executor:
+            while True:
+                mission = self.mission_store.get_mission(mission.mission_id) or mission
+                if mission.status == MissionStatus.CANCELLED:
+                    return ExecutionOutcome(mission_id=mission.mission_id, status=MissionStatus.CANCELLED, completed_steps=sorted(completed_steps), message="Mission cancelled")
+
+                ready_indices = self.dependency_graph.ready_steps(completed_steps)
+                next_indices = [index for index in ready_indices if index not in completed_steps]
+                if not next_indices:
+                    break
+
+                step_index = min(next_indices)
+                step = next(step for step in steps if step.index == step_index)
+                self.mission_store.update_step(step_id=self._step_id(mission.mission_id, step.index), status=StepStatus.RUNNING, retries=step.retries, started_at=utc_now_iso())
+                self.mission_store.update_mission(mission.mission_id, status=MissionStatus.RUNNING, current_step=step.index, agent_state={"current_agent": step.assigned_agent_id, "current_step": step.index})
+                self.audit_store.record(mission.mission_id, MissionEventType.AGENT_STARTED, f"Agent started: {step.assigned_agent_id}", {"step_index": step.index, "step_name": step.name})
+
+                result = self._run_step(mission, step, checkpoint, executor)
+                if result is None:
+                    return ExecutionOutcome(mission_id=mission.mission_id, status=MissionStatus.RETRYING, completed_steps=sorted(completed_steps), failed_step=step.index, message="Step scheduled for retry")
+
+                completed_steps.add(step.index)
+                partial_results.append(result.output)
+                progress = int((len(completed_steps) / max(1, len(steps))) * 100)
+                self.mission_store.update_step(step_id=self._step_id(mission.mission_id, step.index), status=StepStatus.COMPLETED, retries=step.retries, result=result.output, completed_at=utc_now_iso())
+                self.mission_store.update_mission(mission.mission_id, current_step=step.index, completed_steps=sorted(completed_steps), partial_results=partial_results, agent_state={"current_agent": step.assigned_agent_id, "progress": progress})
+                self.checkpoint_manager.save(
+                    MissionCheckpoint(
+                        mission_id=mission.mission_id,
+                        current_step=step.index,
+                        progress=float(progress),
+                        completed_steps=[{"step_id": idx} for idx in sorted(completed_steps)],
+                        agent_state={"current_agent": step.assigned_agent_id, "progress": progress},
+                        partial_results=partial_results,
+                        retry_count=mission.retry_count,
+                    )
+                )
+
+        self.mission_store.update_mission(mission.mission_id, status=MissionStatus.COMPLETED, completed_at=utc_now_iso(), current_step=len(steps))
+        self.audit_store.record(mission.mission_id, MissionEventType.MISSION_COMPLETED, "Mission completed", {"completed_steps": sorted(completed_steps)})
+        return ExecutionOutcome(mission_id=mission.mission_id, status=MissionStatus.COMPLETED, completed_steps=sorted(completed_steps), message="Mission completed")
+
+    def _run_step(self, mission: MissionState, step, checkpoint: MissionCheckpoint | None, executor: ThreadPoolExecutor) -> AgentResult | None:
+        agent = self._agents.get(step.assigned_agent_id, self.research_agent)
+        max_attempts = min(5, max(1, mission.max_retries))
+
+        for attempt in range(1, max_attempts + 1):
+            step_id = self._step_id(mission.mission_id, step.index)
+            self.mission_store.update_step(step_id=step_id, status=StepStatus.RUNNING, retries=attempt, started_at=utc_now_iso())
+            heartbeat_context = AgentRuntimeContext(
+                mission=mission,
+                step=step,
+                checkpoint=checkpoint,
+                retry_count=attempt - 1,
+                heartbeat_callback=self.mission_store.save_heartbeat,
+            )
+            future = executor.submit(agent.execute, heartbeat_context)
+            try:
+                result = future.result(timeout=mission.agent_timeout_seconds)
+                return result
+            except FutureTimeoutError:
+                future.cancel()
+                message = f"{step.assigned_agent_id} timed out after {mission.agent_timeout_seconds}s"
+                self.audit_store.record(mission.mission_id, MissionEventType.AGENT_TIMEOUT, message, {"step_index": step.index, "attempt": attempt})
+                self.mission_store.update_step(step_id=step_id, status=StepStatus.FAILED, failed_at=utc_now_iso(), error=message)
+                self._schedule_retry(mission, step, message, checkpoint)
+                return None
+            except Exception as exc:
+                message = str(exc)
+                logger.exception("agent execution failed for mission %s step %s", mission.mission_id, step.index)
+                self.mission_store.update_step(step_id=step_id, status=StepStatus.FAILED, failed_at=utc_now_iso(), error=message)
+                if attempt >= max_attempts:
+                    self.mission_store.update_mission(mission.mission_id, status=MissionStatus.FAILED, last_error=message, completed_at=utc_now_iso())
+                    self.audit_store.record(mission.mission_id, MissionEventType.MISSION_FAILED, "Mission failed after retries", {"step_index": step.index, "error": message})
+                    return AgentResult(mission_id=mission.mission_id, step_id=step_id, agent_id=step.assigned_agent_id, status="FAILED", progress=0, output={"error": message}, message=message)
+                self._schedule_retry(mission, step, message, checkpoint)
+                return None
+
+        return None
+
+    def _schedule_retry(self, mission: MissionState, step, reason: str, checkpoint: MissionCheckpoint | None) -> None:
+        retry_count = mission.retry_count + 1
+        if retry_count > mission.max_retries:
+            self.mission_store.update_mission(mission.mission_id, status=MissionStatus.FAILED, last_error=reason, completed_at=utc_now_iso())
+            self.audit_store.record(mission.mission_id, MissionEventType.MISSION_FAILED, "Mission failed after maximum retries", {"reason": reason})
+            return
+
+        backoff = min(32, 2 ** retry_count)
+        self.mission_store.update_mission(mission.mission_id, status=MissionStatus.RETRYING, retry_count=retry_count, last_error=reason)
+        checkpoint = checkpoint or self.checkpoint_manager.latest(mission.mission_id)
+        if checkpoint is not None:
+            self.checkpoint_manager.save(checkpoint)
+        self.audit_store.record(mission.mission_id, MissionEventType.RECOVERY_STARTED, "Recovery started", {"reason": reason, "backoff_seconds": backoff, "retry_count": retry_count})
+        self.recovery_engine.request_retry(mission.mission_id, reason, checkpoint)
+
+    def _step_id(self, mission_id: str, step_index: int) -> str:
+        return f"{mission_id}:step:{step_index}"

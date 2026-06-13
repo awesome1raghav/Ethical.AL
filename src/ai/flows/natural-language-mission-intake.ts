@@ -66,7 +66,10 @@ const NaturalLanguageMissionIntakeOutputSchema = z.object({
     is_legal: z.boolean().describe('Whether this step is legal under global AI policy guidelines.'),
     legality_reason: z.string().describe('The ethical justification or reason for this legality classification.')
   })).describe('Structured step-by-step workflow decomposition of the mission.'),
-  suggested_agents: z.array(z.string()).describe('IDs of the registry agents that are useful or required for this mission.'),
+  suggested_agents: z.array(z.object({
+    id: z.string().describe('ID of the registry agent'),
+    reason: z.string().describe('The rationale for why this specific agent is recommended for the mission.')
+  })).describe('List of registry agents that are useful or required for this mission, along with reasons.'),
 });
 export type NaturalLanguageMissionIntakeOutput = z.infer<typeof NaturalLanguageMissionIntakeOutputSchema>;
 
@@ -213,9 +216,17 @@ const naturalLanguageMissionIntakeFlow = ai.defineFlow(
       suggested_agents: []
     };
 
+    // Simple intent inference for fallback
+    let inferredIntent = defaultOutput.primary_intent;
+    const lowerDesc = input.missionDescription.toLowerCase();
+    if (/research|analyze|find|search|investigate/i.test(lowerDesc)) inferredIntent = "Research & Analysis";
+    else if (/finance|budget|money|refund|pay/i.test(lowerDesc)) inferredIntent = "Finance";
+    else if (/security|hack|audit|threat|vulnerability/i.test(lowerDesc)) inferredIntent = "Cybersecurity";
+    else if (/legal|law|policy|compliance/i.test(lowerDesc)) inferredIntent = "Compliance";
+
     // Deep merge / fallback fill-in
     const result = {
-      primary_intent: parsed?.primary_intent || defaultOutput.primary_intent,
+      primary_intent: parsed?.primary_intent || inferredIntent,
       secondary_intents: Array.isArray(parsed?.secondary_intents) ? parsed.secondary_intents : defaultOutput.secondary_intents,
       domain: parsed?.domain || defaultOutput.domain,
       objective: parsed?.objective || defaultOutput.objective,
@@ -255,8 +266,9 @@ const naturalLanguageMissionIntakeFlow = ai.defineFlow(
 
     if (result.workflow_steps.length === 0) {
       // Split description into discrete sentences/clauses
+      // Added ' and ' / ' then ' to handle conversational prompts without punctuation
       const rawSteps = input.missionDescription
-        .split(/[,\n;.]/)
+        .split(/[,\n;.]|\band\b|\bthen\b/i)
         .map((s: string) => s.trim())
         .filter((s: string) => s.length > 5);
 
@@ -298,9 +310,21 @@ const naturalLanguageMissionIntakeFlow = ai.defineFlow(
       });
     }
 
-    // Recalculate suggested_agents to be the set of unique assigned_agent_ids
-    if (result.suggested_agents.length === 0) {
-      result.suggested_agents = Array.from(new Set(result.workflow_steps.map((s: any) => s.assigned_agent_id)));
+    // Recalculate suggested_agents to be the set of unique assigned_agent_ids with reasons
+    if (result.suggested_agents.length === 0 && result.workflow_steps.length > 0) {
+      const agentMap = new Map<string, string>();
+      result.workflow_steps.forEach((s: any) => {
+        if (!agentMap.has(s.assigned_agent_id)) {
+          let defaultReason = "Assigned to process mission objectives.";
+          if (s.assigned_agent_id === 'research_agent') defaultReason = "Required for information synthesis and web knowledge gathering.";
+          if (s.assigned_agent_id === 'threat_detector') defaultReason = "Required to evaluate potential security vulnerabilities or execute security audits.";
+          if (s.assigned_agent_id === 'compliance_enforcer') defaultReason = "Required to ensure policy compliance and ethical boundaries are maintained.";
+          if (s.assigned_agent_id === 'financial_auditor') defaultReason = "Required to securely handle and audit financial or transactional logic.";
+          if (s.assigned_agent_id === 'system_optimizer') defaultReason = "Required to optimize system resources or manage data logs.";
+          agentMap.set(s.assigned_agent_id, defaultReason);
+        }
+      });
+      result.suggested_agents = Array.from(agentMap.entries()).map(([id, reason]) => ({ id, reason }));
     }
     
     // Update workflow steps count

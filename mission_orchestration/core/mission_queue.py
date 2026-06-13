@@ -1,130 +1,80 @@
-"""
-Asynchronous mission queue for non-blocking mission submission and processing.
-"""
+from __future__ import annotations
 
-import queue
+import logging
 import threading
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Callable, Dict, Optional
+from dataclasses import dataclass, field
+from queue import Empty, Queue
+from typing import Callable, Optional
+
+from ..core.mission_state import MissionCheckpoint, MissionStatus
+from ..storage.mission_store import MissionStore
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
-class QueuedMission:
-    """Mission submitted to the queue."""
+class QueueItem:
     mission_id: str
-    description: str
-    submitted_at: datetime
-    priority: int = 0
-    metadata: Optional[Dict] = None
-    timeout_seconds: int = 1800
-    agent_timeout_seconds: int = 300
+    checkpoint: MissionCheckpoint | None = None
+    retry_delay_seconds: int = 0
+    metadata: dict = field(default_factory=dict)
 
 
 class MissionQueue:
-    """Thread-safe queue for mission processing."""
-    
-    def __init__(self, max_size: int = 0, worker_threads: int = 1):
-        """
-        Initialize mission queue.
-        
-        Args:
-            max_size: Maximum queue size (0 = unlimited)
-            worker_threads: Number of worker threads
-        """
-        self._queue: queue.PriorityQueue = queue.PriorityQueue(maxsize=max_size)
-        self._worker_threads: Dict[int, threading.Thread] = {}
-        self._worker_count = worker_threads
-        self._shutdown = False
-        self._process_callback: Optional[Callable] = None
-        self._lock = threading.Lock()
-        self._condition = threading.Condition(self._lock)
-        
-        # Start worker threads
-        for i in range(worker_threads):
-            thread = threading.Thread(
-                target=self._worker,
-                args=(i,),
-                daemon=False,
-                name=f"MissionWorker-{i}"
-            )
-            thread.start()
-            self._worker_threads[i] = thread
-    
-    def submit(self, mission: QueuedMission) -> str:
-        """
-        Submit a mission to the queue.
-        
-        Returns immediately with mission ID.
-        Processing happens in background.
-        """
-        if self._shutdown:
-            raise RuntimeError("Queue is shut down")
-        
-        # Negative priority for max-heap behavior (higher priority values go first)
-        priority = (-mission.priority, mission.submitted_at.timestamp())
-        
-        self._queue.put((priority, mission.mission_id, mission))
-        
-        with self._condition:
-            self._condition.notify()
-        
-        return mission.mission_id
-    
-    def set_process_callback(self, callback: Callable) -> None:
-        """Set callback function to handle mission processing."""
+    def __init__(self, mission_store: MissionStore, handler: Callable[[QueueItem], None] | None = None) -> None:
+        self.mission_store = mission_store
+        self._handler = handler
+        self._queue: Queue[QueueItem] = Queue()
+        self._stop_event = threading.Event()
+        self._worker = threading.Thread(target=self._worker_loop, name="mission-queue-worker", daemon=True)
+        self._timers: list[threading.Timer] = []
+        self._lock = threading.RLock()
+
+    def set_handler(self, handler: Callable[[QueueItem], None]) -> None:
+        self._handler = handler
+
+    def start(self) -> None:
+        if not self._worker.is_alive():
+            self._worker.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
         with self._lock:
-            self._process_callback = callback
-    
-    def _worker(self, worker_id: int) -> None:
-        """Worker thread that processes queued missions."""
-        while not self._shutdown:
+            for timer in self._timers:
+                timer.cancel()
+            self._timers.clear()
+        if self._worker.is_alive():
+            self._worker.join(timeout=2)
+
+    def enqueue(self, mission_id: str, checkpoint: MissionCheckpoint | None = None, retry_delay_seconds: int = 0, metadata: dict | None = None) -> None:
+        item = QueueItem(mission_id=mission_id, checkpoint=checkpoint, retry_delay_seconds=retry_delay_seconds, metadata=metadata or {})
+        if retry_delay_seconds > 0:
+            timer = threading.Timer(retry_delay_seconds, self._enqueue_now, args=(item,))
+            timer.daemon = True
+            with self._lock:
+                self._timers.append(timer)
+            timer.start()
+            return
+        self._enqueue_now(item)
+
+    def _enqueue_now(self, item: QueueItem) -> None:
+        if self._stop_event.is_set():
+            return
+        self.mission_store.update_mission(item.mission_id, status=MissionStatus.QUEUED)
+        self._queue.put(item)
+
+    def _worker_loop(self) -> None:
+        while not self._stop_event.is_set():
             try:
-                with self._condition:
-                    # Wait for mission with timeout
-                    if self._queue.empty():
-                        self._condition.wait(timeout=1)
-                
-                # Try to get mission without blocking
-                try:
-                    _, mission_id, mission = self._queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-                
-                # Process the mission
-                if self._process_callback:
-                    try:
-                        self._process_callback(mission)
-                    except Exception as e:
-                        print(f"[Worker-{worker_id}] Error processing mission {mission_id}: {e}")
-                
+                item = self._queue.get(timeout=0.5)
+            except Empty:
+                continue
+            try:
+                if self._handler is None:
+                    raise RuntimeError("MissionQueue handler is not configured.")
+                self._handler(item)
+            except Exception:
+                logger.exception("mission queue worker failed for mission %s", item.mission_id)
+            finally:
                 self._queue.task_done()
-            
-            except Exception as e:
-                print(f"[Worker-{worker_id}] Unexpected error: {e}")
-    
-    def get_queue_size(self) -> int:
-        """Get current queue size."""
-        return self._queue.qsize()
-    
-    def wait_completion(self, timeout: Optional[float] = None) -> bool:
-        """
-        Wait for all queued missions to complete.
-        
-        Returns True if completed, False if timeout exceeded.
-        """
-        return self._queue.join() is None
-    
-    def shutdown(self, wait: bool = True) -> None:
-        """Shutdown the queue and worker threads."""
-        with self._lock:
-            self._shutdown = True
-            self._condition.notify_all()
-        
-        if wait:
-            for thread in self._worker_threads.values():
-                thread.join(timeout=5)
-    
-    def is_shutdown(self) -> bool:
-        """Check if queue is shut down."""
-        return self._shutdown

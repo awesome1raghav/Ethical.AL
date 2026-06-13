@@ -1,201 +1,56 @@
-"""
-Workflow builder for constructing mission execution plans from mission intent.
-"""
+from __future__ import annotations
 
-from typing import Dict, List, Optional
+import re
+from typing import Iterable, List
 
-from ..core.mission_state import MissionContext
-from .dependency_graph import DependencyGraph, WorkflowNode
+from ..core.mission_state import MissionStep
 
 
 class WorkflowBuilder:
-    """
-    Builds execution workflows from mission intent and agent capabilities.
-    
-    Creates:
-    - Step sequences
-    - Agent assignments
-    - Dependency chains
-    """
-    
-    def __init__(self):
-        self.workflow_templates = self._load_templates()
-    
-    def _load_templates(self) -> Dict[str, List[Dict]]:
-        """Load workflow templates by intent type."""
-        return {
-            "research": [
-                {
-                    "step_id": "research_01",
-                    "agent_id": "research_agent",
-                    "description": "Search and collect research data",
-                    "dependencies": set(),
-                    "retryable": True,
-                    "timeout_seconds": 300
-                },
-                {
-                    "step_id": "research_02",
-                    "agent_id": "analysis_agent",
-                    "description": "Synthesize research findings",
-                    "dependencies": {"research_01"},
-                    "retryable": True,
-                    "timeout_seconds": 300
-                },
-                {
-                    "step_id": "research_03",
-                    "agent_id": "threat_detector",
-                    "description": "Scan for threats and risks",
-                    "dependencies": {"research_02"},
-                    "retryable": True,
-                    "timeout_seconds": 300
-                }
-            ],
-            "systems_analysis": [
-                {
-                    "step_id": "analysis_01",
-                    "agent_id": "threat_detector",
-                    "description": "Detect system threats",
-                    "dependencies": set(),
-                    "retryable": True,
-                    "timeout_seconds": 300
-                },
-                {
-                    "step_id": "analysis_02",
-                    "agent_id": "financial_auditor",
-                    "description": "Analyze financial impact",
-                    "dependencies": {"analysis_01"},
-                    "retryable": True,
-                    "timeout_seconds": 300
-                },
-                {
-                    "step_id": "analysis_03",
-                    "agent_id": "system_optimizer",
-                    "description": "Recommend optimizations",
-                    "dependencies": {"analysis_02"},
-                    "retryable": True,
-                    "timeout_seconds": 300
-                }
-            ],
-            "compliance": [
-                {
-                    "step_id": "compliance_01",
-                    "agent_id": "research_agent",
-                    "description": "Research compliance requirements",
-                    "dependencies": set(),
-                    "retryable": True,
-                    "timeout_seconds": 300
-                },
-                {
-                    "step_id": "compliance_02",
-                    "agent_id": "threat_detector",
-                    "description": "Check compliance violations",
-                    "dependencies": {"compliance_01"},
-                    "retryable": True,
-                    "timeout_seconds": 300
-                },
-                {
-                    "step_id": "compliance_03",
-                    "agent_id": "analysis_agent",
-                    "description": "Generate compliance report",
-                    "dependencies": {"compliance_02"},
-                    "retryable": True,
-                    "timeout_seconds": 300
-                }
-            ],
-            "default": [
-                {
-                    "step_id": "default_01",
-                    "agent_id": "research_agent",
-                    "description": "Execute primary mission task",
-                    "dependencies": set(),
-                    "retryable": True,
-                    "timeout_seconds": 300
-                },
-                {
-                    "step_id": "default_02",
-                    "agent_id": "analysis_agent",
-                    "description": "Analyze results",
-                    "dependencies": {"default_01"},
-                    "retryable": True,
-                    "timeout_seconds": 300
-                }
-            ]
-        }
-    
-    def build_workflow(self, mission_context: MissionContext) -> DependencyGraph:
-        """
-        Build workflow dependency graph from mission context.
-        
-        Returns configured DependencyGraph.
-        """
-        graph = DependencyGraph()
-        
-        # Detect intent type
-        intent_type = self._detect_intent(mission_context.description)
-        
-        # Get appropriate template
-        template = self.workflow_templates.get(intent_type, self.workflow_templates["default"])
-        
-        # Add nodes to graph
-        for step_config in template:
-            node = WorkflowNode(
-                step_id=step_config["step_id"],
-                agent_id=step_config["agent_id"],
-                description=step_config["description"],
-                dependencies=step_config["dependencies"],
-                retryable=step_config["retryable"],
-                timeout_seconds=step_config["timeout_seconds"]
+    def build_steps(self, mission_text: str, suggested_agents: Iterable[str] | None = None) -> List[MissionStep]:
+        text = mission_text.strip()
+        clauses = [clause.strip() for clause in re.split(r"[\n.;]+", text) if clause.strip()]
+        if not clauses:
+            clauses = [text or "Execute mission"]
+
+        steps: List[MissionStep] = []
+        for index, clause in enumerate(clauses):
+            agent_id = self._assign_agent(clause)
+            if suggested_agents:
+                agent_id = self._prefer_suggested(agent_id, suggested_agents)
+            steps.append(
+                MissionStep(
+                    index=index,
+                    name=clause[:240],
+                    assigned_agent_id=agent_id,
+                    is_legal=self._is_legal(clause),
+                    legality_reason=self._legality_reason(clause),
+                    dependencies=[] if index == 0 else [index - 1],
+                )
             )
-            graph.add_node(node)
-        
-        # Validate workflow
-        graph.validate()
-        
-        return graph
-    
-    def _detect_intent(self, description: str) -> str:
-        """Detect mission intent from description."""
-        description_lower = description.lower()
-        
-        if any(word in description_lower for word in ["research", "analyze", "find", "search"]):
-            return "research"
-        
-        if any(word in description_lower for word in ["system", "server", "infrastructure", "platform"]):
-            return "systems_analysis"
-        
-        if any(word in description_lower for word in ["compliance", "policy", "regulation", "audit"]):
-            return "compliance"
-        
-        return "default"
-    
-    def get_next_steps(self, graph: DependencyGraph, 
-                      completed_steps: List[str],
-                      failed_steps: List[str]) -> List[str]:
-        """
-        Get next steps ready for execution.
-        
-        Returns list of step IDs that are ready to run.
-        """
-        completed_set = set(completed_steps)
-        
-        # Don't re-execute failed steps
-        for failed_step in failed_steps:
-            completed_set.add(failed_step)
-        
-        ready_steps = graph.get_ready_steps(completed_set)
-        
-        return ready_steps
-    
-    def build_parallel_workflow(self, mission_context: MissionContext,
-                               num_workers: int = 3) -> DependencyGraph:
-        """
-        Build workflow with parallelizable steps.
-        
-        Attempts to create parallel execution paths where possible.
-        """
-        base_graph = self.build_workflow(mission_context)
-        
-        # For now, return base workflow
-        # Parallel optimization would go here
-        
-        return base_graph
+        return steps
+
+    def _assign_agent(self, text: str) -> str:
+        lowered = text.lower()
+        if any(token in lowered for token in ("security", "threat", "malware", "vulnerability", "exploit", "attack")):
+            return "threat_detector"
+        if any(token in lowered for token in ("refund", "budget", "pricing", "money", "payment", "billing", "finance", "cost")):
+            return "financial_auditor"
+        if any(token in lowered for token in ("optimize", "scale", "schedule", "resource", "performance", "deploy", "workflow")):
+            return "system_optimizer"
+        return "research_agent"
+
+    def _prefer_suggested(self, default_agent: str, suggested_agents: Iterable[str]) -> str:
+        suggestions = list(dict.fromkeys(suggested_agents))
+        if default_agent in suggestions:
+            return default_agent
+        return suggestions[0] if suggestions else default_agent
+
+    def _is_legal(self, text: str) -> bool:
+        lowered = text.lower()
+        return not any(token in lowered for token in ("steal", "malware", "hack", "bypass", "evade", "fraud", "phish", "weapon"))
+
+    def _legality_reason(self, text: str) -> str:
+        if self._is_legal(text):
+            return "Step verified as compliant with mission governance controls."
+        return "Step violates governance controls and requires sovereign review."

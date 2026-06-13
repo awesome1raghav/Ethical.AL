@@ -1,308 +1,110 @@
-"""
-Mission manager for orchestrating mission lifecycle and state transitions.
-"""
+from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, Optional
+from threading import RLock
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from ..core.mission_state import (
-    AgentStatus, EventType, MissionContext, MissionEvent, MissionStatus
-)
-from ..storage.mission_store import AuditStore, MissionStore
+from ..agents import FinancialAuditor, ResearchAgent, SystemOptimizer, ThreatDetector
+from ..core.mission_queue import MissionQueue, QueueItem
+from ..core.mission_state import MissionCheckpoint, MissionEventType, MissionState, MissionStatus, utc_now_iso
+from ..execution.dependency_graph import DependencyGraph
+from ..execution.execution_engine import ExecutionEngine, ExecutionOutcome
+from ..execution.workflow_builder import WorkflowBuilder
+from ..storage.audit_store import AuditStore
+from ..storage.mission_store import MissionStore
 from ..watchdog.checkpoint_manager import CheckpointManager
 from ..watchdog.recovery_engine import RecoveryEngine
+from ..watchdog.watchdog_agent import WatchdogAgent
+
 
 logger = logging.getLogger(__name__)
 
 
 class MissionManager:
-    """Manages mission lifecycle from creation through completion."""
-    
-    def __init__(self, mission_store: MissionStore, audit_store: AuditStore,
-                 checkpoint_manager: CheckpointManager,
-                 recovery_engine: RecoveryEngine):
-        self.mission_store = mission_store
-        self.audit_store = audit_store
-        self.checkpoint_manager = checkpoint_manager
-        self.recovery_engine = recovery_engine
-        self._event_callbacks: Dict[EventType, list] = {}
-    
-    def create_mission(self, description: str, 
-                      timeout_seconds: int = 1800,
-                      agent_timeout_seconds: int = 300,
-                      priority: int = 0) -> MissionContext:
-        """Create and return new mission in PENDING state."""
-        mission_id = str(uuid4())
-        
-        context = self.mission_store.create_mission(
+    def __init__(self, mission_store: MissionStore | None = None, audit_store: AuditStore | None = None) -> None:
+        self.mission_store = mission_store or MissionStore()
+        self.audit_store = audit_store or AuditStore(self.mission_store.db_path)
+        self.workflow_builder = WorkflowBuilder()
+        self.dependency_graph = DependencyGraph()
+        self.checkpoint_manager = CheckpointManager(self.mission_store)
+
+        self.research_agent = ResearchAgent(self.mission_store, self.audit_store)
+        self.threat_detector = ThreatDetector()
+        self.financial_auditor = FinancialAuditor()
+        self.system_optimizer = SystemOptimizer()
+
+        self.queue = MissionQueue(self.mission_store)
+        self.recovery_engine = RecoveryEngine(
+            self.mission_store,
+            self.audit_store,
+            self.checkpoint_manager,
+            requeue_callback=self.queue.enqueue,
+        )
+        self.execution_engine = ExecutionEngine(
+            mission_store=self.mission_store,
+            audit_store=self.audit_store,
+            workflow_builder=self.workflow_builder,
+            dependency_graph=self.dependency_graph,
+            research_agent=self.research_agent,
+            threat_detector=self.threat_detector,
+            financial_auditor=self.financial_auditor,
+            system_optimizer=self.system_optimizer,
+            checkpoint_manager=self.checkpoint_manager,
+            recovery_engine=self.recovery_engine,
+        )
+        self.queue.set_handler(self.execution_engine.execute)
+        self.watchdog = WatchdogAgent(self.mission_store, self.audit_store, self.checkpoint_manager, self.recovery_engine)
+        self._started = False
+        self._lock = RLock()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            self.queue.start()
+            self.watchdog.start()
+            self._started = True
+
+    def shutdown(self) -> None:
+        with self._lock:
+            if not self._started:
+                return
+            self.watchdog.stop()
+            self.queue.stop()
+            self._started = False
+
+    def create_mission(self, description: str, *, primary_intent: str = "General Operation", metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        self.start()
+        mission_id = f"mission_{uuid4().hex[:12]}"
+        steps = self.workflow_builder.build_steps(description)
+        mission = MissionState(
             mission_id=mission_id,
-            description=description,
-            timeout_seconds=timeout_seconds,
-            agent_timeout_seconds=agent_timeout_seconds
+            description=description.strip(),
+            primary_intent=primary_intent,
+            status=MissionStatus.PENDING,
+            workflow_steps=steps,
+            metadata=metadata or {},
         )
-        context.priority = priority
-        
-        # Log creation event
-        self._emit_event(EventType.MISSION_CREATED, mission_id, 
-                        details={"description": description})
-        
-        logger.info(f"[MISSION] Created mission {mission_id}")
-        
-        return context
-    
-    def queue_mission(self, mission_id: str) -> bool:
-        """Transition mission from PENDING to QUEUED."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            logger.error(f"[MISSION] Mission {mission_id} not found")
-            return False
-        
-        if context.status != MissionStatus.PENDING:
-            logger.warning(f"[MISSION] Cannot queue mission {mission_id} in {context.status} state")
-            return False
-        
-        self.mission_store.update_mission_status(mission_id, MissionStatus.QUEUED)
-        
-        logger.info(f"[MISSION] Mission {mission_id} queued")
-        
-        return True
-    
-    def start_mission(self, mission_id: str) -> bool:
-        """Transition mission from QUEUED to RUNNING."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            logger.error(f"[MISSION] Mission {mission_id} not found")
-            return False
-        
-        if context.status == MissionStatus.COMPLETED:
-            logger.warning(f"[MISSION] Mission {mission_id} already completed")
-            return False
-        
-        if context.status == MissionStatus.RUNNING:
-            logger.info(f"[MISSION] Mission {mission_id} already running")
-            return True
-        
-        self.mission_store.set_mission_started(mission_id)
-        self._emit_event(EventType.MISSION_STARTED, mission_id)
-        
-        logger.info(f"[MISSION] Mission {mission_id} started at {datetime.utcnow().isoformat()}")
-        
-        return True
-    
-    def register_agent(self, mission_id: str, agent_id: str) -> bool:
-        """Register agent as active in mission."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return False
-        
-        context.active_agents[agent_id] = AgentStatus.INITIALIZING
-        
-        self._emit_event(EventType.AGENT_STARTED, mission_id, agent_id,
-                        details={"agent": agent_id})
-        
-        logger.info(f"[MISSION] Agent {agent_id} registered for mission {mission_id}")
-        
-        return True
-    
-    def update_agent_heartbeat(self, mission_id: str, agent_id: str,
-                              status: AgentStatus, progress: int,
-                              current_step: int) -> None:
-        """Record agent heartbeat signal."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return
-        
-        context.agent_heartbeats[agent_id] = datetime.utcnow()
-        if agent_id in context.active_agents:
-            context.active_agents[agent_id] = status
-    
-    def record_step_result(self, mission_id: str, step_id: str, agent_id: str,
-                          status: str, output: Dict[str, Any],
-                          error: Optional[str] = None) -> bool:
-        """Record completion of workflow step."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return False
-        
-        from ..core.mission_state import StepResult
-        
-        result = StepResult(
-            step_id=step_id,
-            agent_id=agent_id,
-            status=status,
-            output=output,
-            error=error
-        )
-        
-        context.partial_results.append(result)
-        
-        if status == "success":
-            if step_id not in context.completed_steps:
-                context.completed_steps.append(step_id)
-        elif status == "failed":
-            if step_id not in context.failed_steps:
-                context.failed_steps.append(step_id)
-        
-        logger.info(f"[MISSION] Step {step_id} recorded as {status}")
-        
-        return True
-    
-    def complete_mission(self, mission_id: str, results: Dict[str, Any]) -> bool:
-        """Mark mission as COMPLETED."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return False
-        
-        context.completed_at = datetime.utcnow()
-        self.mission_store.set_mission_completed(mission_id)
-        self.mission_store.update_mission_results(mission_id, results)
-        
-        self._emit_event(EventType.MISSION_COMPLETED, mission_id,
-                        details={"results": results})
-        
-        # Cleanup checkpoints
-        self.recovery_engine.delete_all_checkpoints(mission_id)
-        
-        duration = (context.completed_at - context.started_at).total_seconds() if context.started_at else 0
-        logger.info(f"[MISSION] Mission {mission_id} completed in {duration}s")
-        
-        return True
-    
-    def fail_mission(self, mission_id: str, error: str) -> bool:
-        """Mark mission as FAILED."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return False
-        
-        self.mission_store.update_mission_status(mission_id, MissionStatus.FAILED)
-        
-        self._emit_event(EventType.MISSION_FAILED, mission_id,
-                        details={"error": error})
-        
-        logger.error(f"[MISSION] Mission {mission_id} failed: {error}")
-        
-        return True
-    
-    def cancel_mission(self, mission_id: str) -> bool:
-        """Mark mission as CANCELLED."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return False
-        
-        self.mission_store.update_mission_status(mission_id, MissionStatus.CANCELLED)
-        
-        self._emit_event(EventType.MISSION_CANCELLED, mission_id)
-        
-        # Cleanup checkpoints
-        self.recovery_engine.delete_all_checkpoints(mission_id)
-        
-        logger.info(f"[MISSION] Mission {mission_id} cancelled")
-        
-        return True
-    
-    def pause_mission(self, mission_id: str) -> bool:
-        """Pause mission execution."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return False
-        
-        self.mission_store.update_mission_status(mission_id, MissionStatus.PAUSED)
-        
-        self._emit_event(EventType.MISSION_PAUSED, mission_id)
-        
-        logger.info(f"[MISSION] Mission {mission_id} paused")
-        
-        return True
-    
-    def resume_mission(self, mission_id: str) -> bool:
-        """Resume paused mission."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return False
-        
-        if context.status != MissionStatus.PAUSED:
-            logger.warning(f"[MISSION] Cannot resume mission {mission_id} in {context.status} state")
-            return False
-        
-        self.mission_store.update_mission_status(mission_id, MissionStatus.RUNNING)
-        
-        self._emit_event(EventType.MISSION_RESUMED, mission_id)
-        
-        logger.info(f"[MISSION] Mission {mission_id} resumed")
-        
-        return True
-    
-    def prepare_retry(self, mission_id: str) -> bool:
-        """Prepare mission for retry after timeout."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return False
-        
-        if context.retry_count >= context.max_retries:
-            logger.warning(f"[MISSION] Max retries exceeded for mission {mission_id}")
-            return False
-        
-        self.mission_store.increment_retry_count(mission_id)
-        self.mission_store.update_mission_status(mission_id, MissionStatus.RETRYING)
-        context.last_retry_at = datetime.utcnow()
-        
-        logger.info(f"[MISSION] Mission {mission_id} retry {context.retry_count} initiated")
-        
-        return True
-    
-    def check_mission_timeout(self, mission_id: str) -> bool:
-        """Check if mission has exceeded timeout."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context or not context.started_at:
-            return False
-        
-        elapsed = datetime.utcnow() - context.started_at
-        timeout = timedelta(seconds=context.timeout_seconds)
-        
-        return elapsed > timeout
-    
-    def check_agent_timeout(self, mission_id: str, agent_id: str) -> bool:
-        """Check if agent has exceeded heartbeat timeout."""
-        context = self.mission_store.get_mission(mission_id)
-        if not context:
-            return False
-        
-        last_heartbeat = context.agent_heartbeats.get(agent_id)
-        if not last_heartbeat:
-            return True  # No heartbeat received
-        
-        elapsed = datetime.utcnow() - last_heartbeat
-        timeout = timedelta(seconds=30)  # 30 second heartbeat timeout
-        
-        return elapsed > timeout
-    
-    def on_event(self, event_type: EventType, 
-                callback: Callable[[MissionEvent], None]) -> None:
-        """Register callback for event type."""
-        if event_type not in self._event_callbacks:
-            self._event_callbacks[event_type] = []
-        
-        self._event_callbacks[event_type].append(callback)
-    
-    def _emit_event(self, event_type: EventType, mission_id: str,
-                   agent_id: Optional[str] = None,
-                   details: Optional[Dict[str, Any]] = None) -> None:
-        """Emit event and trigger callbacks."""
-        event = MissionEvent(
-            event_type=event_type,
-            mission_id=mission_id,
-            agent_id=agent_id,
-            details=details or {}
-        )
-        
-        self.audit_store.log_event(event)
-        
-        # Trigger callbacks
-        callbacks = self._event_callbacks.get(event_type, [])
-        for callback in callbacks:
-            try:
-                callback(event)
-            except Exception as e:
-                logger.error(f"[MISSION] Event callback error: {e}")
+        self.mission_store.create_mission(mission)
+        self.audit_store.record(mission_id, MissionEventType.MISSION_CREATED, "Mission created", {"mission_id": mission_id, "step_count": len(steps)})
+        self.mission_store.update_mission(mission_id, status=MissionStatus.QUEUED)
+        self.queue.enqueue(mission_id, metadata={"source": "mission_manager"})
+        return {"mission_id": mission_id, "status": "queued"}
+
+    def cancel_mission(self, mission_id: str) -> Dict[str, Any]:
+        self.mission_store.update_mission(mission_id, status=MissionStatus.CANCELLED, cancelled_at=utc_now_iso())
+        self.audit_store.record(mission_id, MissionEventType.MISSION_CANCELLED, "Mission cancelled", {})
+        return {"mission_id": mission_id, "status": "cancelled"}
+
+    def pause_mission(self, mission_id: str) -> Dict[str, Any]:
+        self.mission_store.update_mission(mission_id, status=MissionStatus.PAUSED)
+        return {"mission_id": mission_id, "status": "paused"}
+
+    def resume_mission(self, mission_id: str) -> Dict[str, Any]:
+        checkpoint = self.checkpoint_manager.latest(mission_id)
+        self.queue.enqueue(mission_id, checkpoint=checkpoint, metadata={"source": "resume"})
+        return {"mission_id": mission_id, "status": "queued"}
+
+    def get_mission(self, mission_id: str) -> Optional[MissionState]:
+        return self.mission_store.get_mission(mission_id)
